@@ -114,7 +114,7 @@ def getKeyPoints(c_vec, d_vec, index, threshold):
 	return key_points
 
 
-def doColumns(img, ratio):
+def doColumns(img, ratio, kpt_thresh, dst_thresh):
 	# image dimensions
 	height, width = img.shape
 
@@ -135,8 +135,6 @@ def doColumns(img, ratio):
 		sdiffs = getSqrdDiffs(col, ratio)
 		col_sqr_diffs.append(sdiffs)
 
-	# threshold for key points
-	KPT_THRESH = .5
 	# keep track of what column we're at
 	col_num = 0
 	# store key points here
@@ -145,7 +143,7 @@ def doColumns(img, ratio):
 		key_points = key_points + getKeyPoints(	column_ratios, 
 												col, 
 												col_num, 
-												KPT_THRESH)
+												kpt_thresh)
 		col_num += 1
 
 	# clean up key points to get good key points
@@ -156,17 +154,16 @@ def doColumns(img, ratio):
 	avg /= len(key_points)
 
 	good_key_points = []
-	# kinda arbitrary for right now
-	DST_KPT_THRESH = width / 1
+
 	for pt in key_points:
 		if(math.sqrt(	(pt[len(pt)-1] - avg) * 
-						(pt[len(pt)-1] - avg)) < DST_KPT_THRESH 
+						(pt[len(pt)-1] - avg)) < dst_thresh 
 						and pt[len(pt) - 1] > 0):
 			good_key_points.append(pt)
 
 	return good_key_points
 
-def doRows(img, ratio):
+def doRows(img, ratio, kpt_thresh, dst_thresh):
 	# image dimensions
 	height, width = img.shape
 
@@ -187,8 +184,6 @@ def doRows(img, ratio):
 		sdiffs = getSqrdDiffs(row, ratio)
 		row_sqr_diffs.append(sdiffs)
 
-	# threshold for key points
-	KPT_THRESH = .5
 	# keep track of what column we're at
 	row_num = 0
 	# store key points here
@@ -197,7 +192,7 @@ def doRows(img, ratio):
 		key_points = key_points + getKeyPoints(	row_ratios, 
 												row, 
 												row_num, 
-												KPT_THRESH)
+												kpt_thresh)
 		row_num += 1
 
 	# clean up key points to get good key points
@@ -209,48 +204,178 @@ def doRows(img, ratio):
 
 	good_key_points = []
 	# kinda arbitrary for right now
-	DST_KPT_THRESH = width / 1
 	for pt in key_points:
 		if(math.sqrt(	(pt[len(pt)-1] - avg) * 
-						(pt[len(pt)-1] - avg)) < DST_KPT_THRESH 
+						(pt[len(pt)-1] - avg)) < dst_thresh
 						and pt[len(pt) - 1] > 0):
 			good_key_points.append(pt)
 
 	return good_key_points
 
-def main():
-	file = 'test/worst_v2.png' 
-
-	# image to search for qr code
-	img = cv.imread(file, 0)
-	height, width = img.shape
-	M = cv.getRotationMatrix2D((width/2,height/2),10,1)
-	img = cv.warpAffine(img,M,(width,height))
-
+def getGoodKeyPoints(img, kpt_thresh, dst_thresh):
 	# threshold image to get only white and black pixels
 	ret,img = cv.threshold(img,127,255,cv.THRESH_BINARY)
 
 	# ratios to test for
 	ratio = np.array([[1, 1, 3, 1, 1], [0, 1, 0, 1, 0]])
 
-	good_key_points_cols = doColumns(img, ratio)
-	good_key_points_rows = doRows(img, ratio)
+	good_key_points_cols = doColumns(img, ratio, kpt_thresh, dst_thresh)
+	good_key_points_rows = doRows(img, ratio, kpt_thresh, dst_thresh)
 
+	gkp = []
+	hor = []
+	vert = []
+
+	for pt in good_key_points_cols:
+		gkp.append([pt[3], pt[0]])
+		hor.append([pt[3], pt[0]])
+
+	for pt in good_key_points_rows:
+		gkp.append([pt[0], pt[3]])
+		vert.append([pt[0], pt[3]])
+
+	return (gkp, hor, vert)
+
+def bestFit(pts):
+	X = [p[0] for p in pts]
+	Y = [p[1] for p in pts]
+
+	xbar = sum(X)/len(X)
+	ybar = sum(Y)/len(Y)
+	n = len(X)
+
+	numer = sum([xi*yi for xi,yi in zip(X, Y)]) - n * xbar * ybar
+	denum = sum([xi**2 for xi in X]) - n * xbar**2
+
+	if(denum == 0):
+		b = 0.0000000000000001
+	else:
+		b = numer / denum
+	a = ybar - b * xbar
+
+	return a, b
+
+def inRange(test, mn, mx):
+	return test <= mx and test >= mn
+
+def getIntersection(line1, line2):
+
+	b2 = line2[1]
+	a2 = line2[0]
+
+	b1 = line1[1]
+	a1 = line1[0]
+
+	# b1*x + a1 = b2*x +a2
+	# b1*x - b2*x = a2 - a1
+	# c*x = d
+	# x = d / c
+	c = b1 - b2
+	d = a2 - a1
+	xf = d / c
+
+	#if(inRange(xf, min(x1, x2), max(x1, x2))):
+	return [xf, line1[0] + line1[1] * xf]
+	#else:
+	
+	#	return False
+
+def drawLine(image, color, line, width, height):
+	for x in range(0, width):
+		y = line[0] + line[1] * x
+		if(inRange(y, 0, height-1)):
+			image[x, y] = color
+
+def getLine(p1, p2):
+	x1, y1 = p1[0], p1[1]
+	x2, y2 = p2[0], p2[1]
+
+	m = (y2-y1)/(x2-x1)
+
+	b = m * (-1 * x1) + y1
+
+	return b, m
+		
+def iterate(img, KPT_THRESH, DST_KPT_THRESH, width, height):
+	good_key_points, horiz, vert = getGoodKeyPoints(img, KPT_THRESH, DST_KPT_THRESH)
+
+	img_r = img
+
+	img_c = cv.cvtColor(img, cv.COLOR_GRAY2RGB)
+
+	line1 = bestFit(horiz)
+	line2 = bestFit(vert)
+
+	drawLine(img_c, [0, 255, 0], line1, width, height)
+	drawLine(img_c, [255, 0, 0], line2, width, height)
+
+	inter = getIntersection(line1, line2)
+
+	try:
+		cv.line(img_c, (int(inter[1]), 0), (int(inter[1]), height-1), (0, 0, 255), 1)
+		cv.line(img_c, (0, int(inter[0])), (width - 1, int(inter[0])), (0, 0, 255), 1)
+
+		cv.circle(img_c, (int(inter[1]), int(inter[0])), 3, (255, 0, 255), 2)
+	except:
+		print('Crash and burn baby')
+
+
+	deg = math.degrees(math.atan(line1[1]))
+	delta = np.sign(deg)*90 - deg
+
+	while(delta < -360):
+		delta += 360
+
+	while(delta > 360):
+		delta -= 360
+
+	print(delta)
+
+	M2 = cv.getRotationMatrix2D((width/2,height/2), delta, 1)
+	img_r = cv.warpAffine(img_r, M2, (width, height))
+
+	return img_r, delta, img_c
+
+def main():
+	file = 'slices/large/tl_slice_large.png' 
+
+	# image to search for qr code
+	img = cv.imread(file, 0)
+	height, width = img.shape
+
+	angle = 0
+
+	M = cv.getRotationMatrix2D((width/2,height/2), angle, 1)
+	img = cv.warpAffine(img,M,(width,height))
+
+	KPT_THRESH = 0.1
+	DST_KPT_THRESH = width / 20
 
 	#
 	# debug stuff
 	#
 
-	img_c = cv.imread(file, 3)
-	img_c = cv.warpAffine(img_c,M,(width,height))
+	subplots = []
+	subplots.append(cv.cvtColor(img, cv.COLOR_GRAY2RGB))
 
-	for pt in good_key_points_cols:
-		img_c[pt[3], pt[0]] = [0, 255, 0]
+	nimg, delta, nimg_c = iterate(img, KPT_THRESH, DST_KPT_THRESH, width, height)
+	subplots.append(nimg_c)
+	#plt.imshow(nimg_c),plt.show()
+	while not inRange(delta, -1, 1) and int(abs(delta)) != 90:
+		nimg, delta, nimg_c = iterate(nimg, KPT_THRESH, DST_KPT_THRESH, width, height)
+		subplots.append(nimg_c)
+		#plt.imshow(nimg_c),plt.show()
 
-	for pt in good_key_points_rows:
-		img_c[pt[0], pt[3]] = [255, 0, 0]
+	#M2 = cv.getRotationMatrix2D((width/2,height/2), delta, 1)
+	#img_r = cv.warpAffine(img_r, M2, (width, height))
 
+	f, axarr = plt.subplots(2, sharex = False)
+	axarr[0].imshow(subplots[0])
+	axarr[0].set_title("Original")
 
-	plt.imshow(img_c),plt.show()
+	axarr[1].imshow(subplots[len(subplots)-1])
+	axarr[1].set_title("Iteration #" + str(len(subplots)))
+	
+	plt.show()
 
 main()
